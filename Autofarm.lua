@@ -1,23 +1,57 @@
--- FINAL: cuenta escapes ayudados solo cuando la stat real sube mientras la GUI/autoEscape está activa
+-- Evitar doble ejecución
+if getgenv().AUTO_SYSTEM_LOADED then return end
+getgenv().AUTO_SYSTEM_LOADED = true
+
+-- Guardar URL UNA SOLA VEZ
+local SCRIPT_URL = "https://raw.githubusercontent.com/davidsebas348-hub/Rrrrr/main/Autofarm.lua"
+
+-- Auto execute al teleport
+if queue_on_teleport then
+    queue_on_teleport('loadstring(game:HttpGet("'..SCRIPT_URL..'"))()')
+end
+
+-- FINAL AUTO SYSTEM (FIXED FULL)
+
 local player = game.Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- PlaceId
+--------------------------------------------------
+-- SAFE REMOTE
+--------------------------------------------------
+local function fireLobbyRemote()
+    local remote = ReplicatedStorage:FindFirstChild("TPToLobby")
+    if remote then
+        pcall(function()
+            remote:FireServer()
+        end)
+    end
+end
+
+--------------------------------------------------
+-- PLACE IDS
+--------------------------------------------------
 local LOBBY_ID = 87141336196355
 local PARTIDA_ID = 97210805647799
 
--- Coordenadas para Lobby
 local LOBBY_COORD = Vector3.new(15,4,-57)
 
--- Persistencia (guardamos totalTime en segundos y guiEscapesHelped)
+--------------------------------------------------
+-- SAVE SYSTEM
+--------------------------------------------------
 local filename = "AutoSystem_"..player.UserId..".json"
-local state = { totalTime = 0, guiEscapesHelped = 0 }
+
+local state = {
+    totalTime = 0,
+    guiEscapesHelped = 0
+}
+
 pcall(function()
     if isfile and isfile(filename) then
-        local ok, dec = pcall(function() return HttpService:JSONDecode(readfile(filename)) end)
-        if ok and type(dec) == "table" then
-            state.totalTime = tonumber(dec.totalTime) or 0
-            state.guiEscapesHelped = tonumber(dec.guiEscapesHelped) or 0
+        local data = HttpService:JSONDecode(readfile(filename))
+        if type(data) == "table" then
+            state.totalTime = tonumber(data.totalTime) or 0
+            state.guiEscapesHelped = tonumber(data.guiEscapesHelped) or 0
         end
     end
 end)
@@ -28,232 +62,239 @@ local guiEscapesHelped = state.guiEscapesHelped
 local function saveState()
     pcall(function()
         if writefile then
-            writefile(filename, HttpService:JSONEncode({ totalTime = totalTime, guiEscapesHelped = guiEscapesHelped }))
+            writefile(filename, HttpService:JSONEncode({
+                totalTime = totalTime,
+                guiEscapesHelped = guiEscapesHelped
+            }))
         end
     end)
 end
 
--- Helpers jugador
+--------------------------------------------------
+-- PLAYER HELPERS
+--------------------------------------------------
 local function getHRP()
     local c = player.Character
-    return (c and c:FindFirstChild("HumanoidRootPart")) or nil
+    return c and c:FindFirstChild("HumanoidRootPart")
 end
 
 local function findEscapeDoor()
     for _,v in ipairs(workspace:GetDescendants()) do
         if v:IsA("BasePart") then
-            local n = (v.Name or ""):lower()
+            local n = v.Name:lower()
             if n:find("escape") or n:find("exit") or n:find("finish") then
                 return v
             end
         end
     end
-    return nil
 end
 
--- Variables para detectar asistencias
+--------------------------------------------------
+-- ESCAPE STAT DETECTOR
+--------------------------------------------------
 local AutoEscapeActive = false
-local assistedUntil = 0 -- os.time() until which a stat increase counts as assisted
-local ASSIST_WINDOW = 6 -- segundos de margen para que el stat update que sigue a un teleport se considere asistido
+local assistedUntil = 0
+local ASSIST_WINDOW = 6
 
--- Detect/choose the player's "escape" stat (blue) and optionally another stat for GUI (but we use changed event)
+local escapeStatObj
+local escapePrevValue = 0
+local statConnection
+local lastTP = 0
+local TP_COOLDOWN = 5
+
 local function findEscapeStatObject()
     local stats = player:FindFirstChild("leaderstats")
-    if not stats then return nil end
-    -- prefer exact "Escapes"
-    local e = stats:FindFirstChild("Escapes") or stats:FindFirstChild("Escape") or stats:FindFirstChild("Escaped")
-    if e and (e:IsA("NumberValue") or e:IsA("IntValue")) then return e end
-    -- fallback: first numeric stat
+    if not stats then return end
+
+    local e =
+        stats:FindFirstChild("Escapes")
+        or stats:FindFirstChild("Escape")
+        or stats:FindFirstChild("Escaped")
+
+    if e and (e:IsA("IntValue") or e:IsA("NumberValue")) then
+        return e
+    end
+
     for _,v in ipairs(stats:GetChildren()) do
-        if v:IsA("NumberValue") or v:IsA("IntValue") then
+        if v:IsA("IntValue") or v:IsA("NumberValue") then
             return v
         end
     end
-    return nil
 end
 
-local escapeStatObj = findEscapeStatObject()
-local escapePrevValue = escapeStatObj and tonumber(escapeStatObj.Value) or 0
+local function connectEscapeStat()
 
--- Conectar Changed para detectar aumentos reales
-if escapeStatObj then
-    escapeStatObj.Changed:Connect(function(newVal)
+    if statConnection then
+        statConnection:Disconnect()
+        statConnection = nil
+    end
+
+    escapeStatObj = findEscapeStatObject()
+    if not escapeStatObj then return end
+
+    escapePrevValue = tonumber(escapeStatObj.Value) or 0
+
+    statConnection = escapeStatObj.Changed:Connect(function(newVal)
+
         local newNum = tonumber(newVal) or 0
-        -- always update blue separately (UI loop will also refresh, but this reduces delay)
-        -- If it increased and we had autoescape active recently, count as assisted
+
         if newNum > escapePrevValue then
+
             if AutoEscapeActive or os.time() <= assistedUntil then
-                guiEscapesHelped = guiEscapesHelped + 1
+                guiEscapesHelped += 1
                 saveState()
             end
+
+            if game.PlaceId == PARTIDA_ID then
+                if tick() - lastTP > TP_COOLDOWN then
+                    lastTP = tick()
+                    fireLobbyRemote()
+                end
+            end
         end
+
         escapePrevValue = newNum
     end)
 end
 
--- Auto actions (teleport/escape)
+connectEscapeStat()
+
+player.ChildAdded:Connect(function(c)
+    if c.Name == "leaderstats" then
+        task.wait(1)
+        connectEscapeStat()
+    end
+end)
+
+--------------------------------------------------
+-- AUTO ACTIONS
+--------------------------------------------------
 local function autoEscape()
     local hrp = getHRP()
     local door = findEscapeDoor()
+
     if hrp and door then
-        -- mark active + window for assistance
         AutoEscapeActive = true
         assistedUntil = os.time() + ASSIST_WINDOW
-        pcall(function()
-            hrp.CFrame = CFrame.new(door.Position + Vector3.new(0,3,0))
-        end)
-        -- we DO NOT increment guiEscapesHelped here (we wait for the stat change)
-        -- but keep state saved in case window triggers
+
+        hrp.CFrame = CFrame.new(door.Position + Vector3.new(0,3,0))
+
         saveState()
-        -- turn off AutoEscapeActive shortly after to avoid double counting
-        task.delay(ASSIST_WINDOW, function() AutoEscapeActive = false end)
-        return true
+
+        task.delay(ASSIST_WINDOW,function()
+            AutoEscapeActive = false
+        end)
     end
-    return false
 end
 
 local function tpToCoord()
     local hrp = getHRP()
     if hrp then
-        -- teleporting in lobby might not give escape stat — but still mark window if you want
-        AutoEscapeActive = true
-        assistedUntil = os.time() + ASSIST_WINDOW
-        pcall(function()
-            hrp.CFrame = CFrame.new(LOBBY_COORD)
-        end)
-        saveState()
-        task.delay(ASSIST_WINDOW, function() AutoEscapeActive = false end)
-        return true
+        hrp.CFrame = CFrame.new(LOBBY_COORD)
     end
-    return false
 end
 
--- get official total escapes (blue)
+--------------------------------------------------
+-- GET ESCAPES VALUE
+--------------------------------------------------
 local function getEscapesStatValue()
-    local stats = player:FindFirstChild("leaderstats")
-    if not stats then return 0 end
-    -- prefer "Escapes"
-    local esc = stats:FindFirstChild("Escapes") or stats:FindFirstChild("Escape") or stats:FindFirstChild("Escaped")
-    if esc and (esc:IsA("NumberValue") or esc:IsA("IntValue")) then
-        return tonumber(esc.Value) or 0
-    end
-    -- fallback any numeric stat
-    for _,v in ipairs(stats:GetChildren()) do
-        if v:IsA("NumberValue") or v:IsA("IntValue") then
-            return tonumber(v.Value) or 0
-        end
-    end
-    return 0
+    local stat = findEscapeStatObject()
+    return stat and tonumber(stat.Value) or 0
 end
 
--- === GUI (NO CAMBIOS de posición/colores) ===
+--------------------------------------------------
+-- GUI
+--------------------------------------------------
 local gui = Instance.new("ScreenGui", player.PlayerGui)
+
 local frame = Instance.new("Frame", gui)
-frame.Size = UDim2.new(0, 420, 0, 240)
-frame.Position = UDim2.new(0.5, -210, 0.1, 0)
-frame.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+frame.Size = UDim2.new(0,420,0,240)
+frame.Position = UDim2.new(0.5,-210,0.1,0)
+frame.BackgroundColor3 = Color3.fromRGB(0,100,200)
 frame.BackgroundTransparency = 0.4
 frame.BorderSizePixel = 6
 frame.Active = true
 frame.Draggable = true
 
-local titleLabel = Instance.new("TextLabel", frame)
-titleLabel.Size = UDim2.new(1,0,0,40)
-titleLabel.BackgroundTransparency = 1
-titleLabel.TextColor3 = Color3.fromRGB(255,255,255)
-titleLabel.TextScaled = true
-titleLabel.Text = "SISTEMA AUTO"
+local title = Instance.new("TextLabel", frame)
+title.Size = UDim2.new(1,0,0,40)
+title.BackgroundTransparency = 1
+title.TextScaled = true
+title.TextColor3 = Color3.new(1,1,1)
+title.Text = "SISTEMA AUTO"
 
-local idNameLabel = Instance.new("TextLabel", frame)
-idNameLabel.Position = UDim2.new(0,0,0,40)
-idNameLabel.Size = UDim2.new(1,0,0,30)
-idNameLabel.BackgroundTransparency = 1
-idNameLabel.TextColor3 = Color3.fromRGB(255,255,255)
-idNameLabel.TextScaled = true
-idNameLabel.Text = "ID: "..tostring(player.UserId).."   Nombre: "..tostring(player.Name)
-
--- keep TextButtons as indicators (same names/positions/colors)
 local TiempoBtn = Instance.new("TextButton", frame)
-TiempoBtn.Name = "TiempoBtn"
 TiempoBtn.Size = UDim2.new(0.45,0,0,50)
 TiempoBtn.Position = UDim2.new(0.05,0,0,80)
 TiempoBtn.BackgroundColor3 = Color3.fromRGB(180,0,0)
-TiempoBtn.TextColor3 = Color3.new(1,1,1)
+TiempoBtn.TextColor3 = Color3.fromRGB(255, 255, 255) -- blanco
 TiempoBtn.TextScaled = true
-TiempoBtn.Text = "Tiempo: 0d 0h 0m 0s"
 TiempoBtn.AutoButtonColor = false
 
 local EscapesBtn = Instance.new("TextButton", frame)
-EscapesBtn.Name = "EscapesBtn"
 EscapesBtn.Size = UDim2.new(0.45,0,0,50)
 EscapesBtn.Position = UDim2.new(0.5,0,0,80)
 EscapesBtn.BackgroundColor3 = Color3.fromRGB(0,110,255)
-EscapesBtn.TextColor3 = Color3.new(1,1,1)
+EscapesBtn.TextColor3 = Color3.fromRGB(255, 255, 255) -- blanco
 EscapesBtn.TextScaled = true
-EscapesBtn.Text = "Escapes total: 0"
 EscapesBtn.AutoButtonColor = false
 
 local GUIEscapesBtn = Instance.new("TextButton", frame)
-GUIEscapesBtn.Name = "GUIEscapesBtn"
 GUIEscapesBtn.Size = UDim2.new(0.92,0,0,50)
 GUIEscapesBtn.Position = UDim2.new(0.04,0,0,140)
 GUIEscapesBtn.BackgroundColor3 = Color3.fromRGB(0,170,0)
-GUIEscapesBtn.TextColor3 = Color3.new(1,1,1)
+GUIEscapesBtn.TextColor3 = Color3.fromRGB(255, 255, 255) -- blanco
 GUIEscapesBtn.TextScaled = true
-GUIEscapesBtn.Text = "Escapes conseguidos: "..tostring(guiEscapesHelped)
 GUIEscapesBtn.AutoButtonColor = false
 
--- robust loop: accumulate delta seconds so totalTime persists and never locks
+--------------------------------------------------
+-- MAIN LOOP
+--------------------------------------------------
 local lastTick = tick()
-local autosaveCounter = 0
+local lastLobbyTP = 0
+local autosave = 0
+
 task.spawn(function()
     while true do
-        local ok, err = pcall(function()
-            local now = tick()
-            local dt = now - lastTick
-            if dt < 0 then dt = 0 end
-            -- clamp large dt (if app was suspended) to avoid giant jumps
-            if dt > 10 then dt = 1 end
-            totalTime = totalTime + dt
-            lastTick = now
+        local now = tick()
+        local dt = math.clamp(now - lastTick,0,10)
+        lastTick = now
 
-            -- auto actions: non-blocking
-            local hrp = getHRP()
-            if hrp then
-                if game.PlaceId == LOBBY_ID then
-                    pcall(tpToCoord)
-                elseif game.PlaceId == PARTIDA_ID then
-                    pcall(autoEscape)
+        totalTime += dt
+
+        local hrp = getHRP()
+        if hrp then
+            if game.PlaceId == LOBBY_ID then
+                if tick() - lastLobbyTP > 5 then
+                    lastLobbyTP = tick()
+                    tpToCoord()
                 end
+            elseif game.PlaceId == PARTIDA_ID then
+                autoEscape()
             end
-
-            -- update UI
-            local t = math.floor(totalTime)
-            local days = math.floor(t / 86400)
-            local hours = math.floor(t/3600) % 24
-            local mins = math.floor(t/60) % 60
-            local secs = t % 60
-            pcall(function()
-                TiempoBtn.Text = string.format("Tiempo: %dd %dh %dm %ds", days, hours, mins, secs)
-                EscapesBtn.Text = "Escapes total: "..tostring(getEscapesStatValue())
-                GUIEscapesBtn.Text = "Escapes conseguidos: "..tostring(guiEscapesHelped)
-            end)
-
-            autosaveCounter = autosaveCounter + 1
-            if autosaveCounter >= 5 then
-                -- persist values
-                pcall(function()
-                    state.totalTime = math.floor(totalTime)
-                    state.guiEscapesHelped = guiEscapesHelped
-                    if writefile then writefile(filename, HttpService:JSONEncode(state)) end
-                end)
-                autosaveCounter = 0
-            end
-        end)
-        if not ok then
-            -- don't crash; loop continues
-            --print("AutoSystem loop error:", err)
         end
+
+        local t = math.floor(totalTime)
+        local d = math.floor(t/86400)
+        local h = math.floor(t/3600)%24
+        local m = math.floor(t/60)%60
+        local s = t%60
+
+        TiempoBtn.Text =
+            string.format("Tiempo: %dd %dh %dm %ds",d,h,m,s)
+
+        EscapesBtn.Text =
+            "Escapes total: "..getEscapesStatValue()
+
+        GUIEscapesBtn.Text =
+            "Escapes conseguidos: "..guiEscapesHelped
+
+        autosave += 1
+        if autosave >= 5 then
+            autosave = 0
+            saveState()
+        end
+
         task.wait(1)
     end
 end)
